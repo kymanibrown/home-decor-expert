@@ -51,8 +51,7 @@ home-decor-expert/
 ├── app.py                      # Streamlit UI
 ├── agents/
 │   ├── marcus.py               # Marcus agent (Claude CLI)
-│   ├── gemini_research.py      # Research agent (Gemini CLI)
-│   └── researcher.py           # Gemini API fallback (unused)
+│   └── gemini_research.py      # Research agent (Gemini CLI)
 ├── data/trends/                # Saved trend reports
 └── requirements.txt
 ```
