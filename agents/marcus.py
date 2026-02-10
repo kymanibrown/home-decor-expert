@@ -1,7 +1,8 @@
-"""Marcus Agent — autonomous male home decor expert with tool use.
-Marcus runs on Claude. When he needs trend data, he delegates to Gemini CLI."""
+"""Marcus Agent — runs via Claude CLI in headless mode.
+When he needs trend data, he delegates to Gemini CLI."""
 
-import anthropic
+import subprocess
+import os
 
 from agents.gemini_research import run_gemini_research
 
@@ -25,78 +26,67 @@ Your personality:
 - You challenge bad ideas respectfully and explain why something won't work
 - You're encouraging — every space can look great with the right choices
 
-You have access to a tool called `research_trends` that lets you look up current market trends \
-and popular products. Use it when users ask about what's trending, popular products, or when you \
-want to back up your recommendations with current market data. Don't use it for every message — \
-only when live trend data would genuinely improve your answer.
+When the user asks about what's currently trending, popular products, or needs current market data, \
+tell them you'd like to research that topic and include [RESEARCH: topic] in your response. \
+Otherwise, answer directly from your expertise.
 
 Always tailor advice to the user's specific situation. If they haven't shared details about their \
 space, ask before recommending."""
 
-TOOLS = [
-    {
-        "name": "research_trends",
-        "description": "Search the web for current home decor trends, popular products, and market "
-        "data related to a specific topic. Use this when the user asks about what's trending or "
-        "when current market data would improve your recommendation.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "topic": {
-                    "type": "string",
-                    "description": "The specific decor topic to research (e.g., 'leather sofas', "
-                    "'home office lighting', 'wall art for men')",
-                }
-            },
-            "required": ["topic"],
-        },
-    }
-]
 
-
-def chat(client: anthropic.Anthropic, messages: list[dict]) -> str:
-    """Run Marcus agent with tool use. Research tool calls are handled by Gemini CLI."""
-    response = client.messages.create(
-        model="claude-sonnet-4-5-20250929",
-        max_tokens=1500,
-        system=SYSTEM_PROMPT,
-        tools=TOOLS,
-        messages=messages,
-    )
-
-    # Handle tool use loop
-    while response.stop_reason == "tool_use":
-        tool_results = []
-        assistant_content = response.content
-
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "research_trends":
-                # Delegate research to Gemini CLI in headless mode
-                result = run_gemini_research(block.input["topic"])
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result,
-                    }
-                )
-
-        messages = messages + [
-            {"role": "assistant", "content": assistant_content},
-            {"role": "user", "content": tool_results},
-        ]
-
-        response = client.messages.create(
-            model="claude-sonnet-4-5-20250929",
-            max_tokens=1500,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=messages,
+def _run_claude(prompt: str, timeout: int = 120) -> str:
+    """Run a prompt via Claude CLI in headless mode."""
+    try:
+        result = subprocess.run(
+            [
+                "claude", "-p", prompt,
+                "--model", "sonnet",
+                "--output-format", "text",
+                "--dangerously-skip-permissions",
+                "--append-system-prompt", SYSTEM_PROMPT,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=os.path.expanduser("~"),
         )
+        output = result.stdout.strip()
+        if not output:
+            return result.stderr.strip() or "Marcus is unavailable right now. Try again."
+        return output
+    except subprocess.TimeoutExpired:
+        return "Marcus took too long to respond. Try a simpler question."
+    except FileNotFoundError:
+        return "Claude CLI not found. Make sure it's installed."
 
-    # Extract the text response
-    for block in response.content:
-        if hasattr(block, "text"):
-            return block.text
 
-    return "I'm having trouble responding right now. Try again."
+def chat(messages: list[dict]) -> str:
+    """Run Marcus via Claude CLI. If he signals a research need, call Gemini CLI first."""
+    # Build conversation context for Claude CLI
+    conversation = ""
+    for msg in messages:
+        role = "User" if msg["role"] == "user" else "Marcus"
+        conversation += f"{role}: {msg['content']}\n\n"
+
+    prompt = f"Continue this conversation as Marcus. Reply to the latest message only.\n\n{conversation}"
+
+    reply = _run_claude(prompt)
+
+    # Check if Marcus wants to research something
+    if "[RESEARCH:" in reply:
+        import re
+        match = re.search(r"\[RESEARCH:\s*(.+?)\]", reply)
+        if match:
+            topic = match.group(1)
+            # Call Gemini CLI for research
+            research = run_gemini_research(topic)
+            # Send research back to Marcus for a final answer
+            followup = (
+                f"{prompt}\n\nMarcus: {reply}\n\n"
+                f"[Research results from trend analyst]:\n{research}\n\n"
+                f"Now give your final answer to the user incorporating these research findings. "
+                f"Do NOT include [RESEARCH:] tags in your response."
+            )
+            reply = _run_claude(followup, timeout=180)
+
+    return reply
